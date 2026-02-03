@@ -393,3 +393,64 @@ test "Parser" {
     const root = try parser.parse() orelse unreachable;
     parser.parse_tree.dumpRecurse(root, 0);
 }
+
+const Value = packed struct {
+    nan_tag: u16,
+    payload: u48,
+
+    const NanTag: u16 = @as(u64, @bitCast(std.math.nan(f64))) >> 48;
+
+    // TODO: Change number to int in other places
+    const IntTag: u16 = 0x001 | NanTag;
+
+    comptime {
+        std.debug.assert(@sizeOf(Value) == 8);
+        std.debug.assert(0x7FF8 == NanTag);
+    }
+
+    pub fn isFloat(v: Value) bool {
+        return v.nan_tag & NanTag != NanTag or v.nan_tag == NanTag;
+    }
+
+    pub fn asFloat(v: Value) f64 {
+        return @bitCast(v);
+    }
+
+    pub fn fromFloat(f: f64) Value {
+        return @bitCast(f);
+    }
+
+    pub fn isNumber(v: Value) bool {
+        return v.nan_tag == IntTag;
+    }
+
+    pub fn asNumber(v: Value) i32 {
+        const n_s: i48 = @bitCast(v.payload);
+        return @truncate(n_s);
+    }
+
+    pub fn fromNumber(n: i32) Value {
+        const n_s: u32 = @bitCast(n);
+        return Value{ .nan_tag = IntTag, .payload = n_s };
+    }
+};
+
+test "Value" {
+    const numbers = [_]i32{ 5, -1, 12, std.math.maxInt(i32), std.math.minInt(i32) };
+    for (numbers) |n| {
+        const v = Value.fromNumber(n);
+        try std.testing.expect(v.isNumber());
+        try std.testing.expectEqual(n, v.asNumber());
+    }
+
+    const floats = [_]f64{ 0, -1.1, 69, std.math.pi };
+    for (floats) |f| {
+        const v = Value.fromFloat(f);
+        try std.testing.expect(v.isFloat());
+        try std.testing.expectEqual(f, v.asFloat());
+    }
+
+    const nan = std.math.nan(f64);
+    // NaN is special, because it cannot be equal to itself
+    try std.testing.expect(Value.fromFloat(nan).isFloat());
+}
