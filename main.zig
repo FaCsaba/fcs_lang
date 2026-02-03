@@ -558,3 +558,72 @@ const BytecodeCompiler = struct {
     }
 };
 
+const VM = struct {
+    pc: usize = 0,
+    program: []const Bytecode = &.{},
+    // TODO: this should prolly be a list
+    stack: [256]Value = undefined,
+    stack_idx: usize = 0,
+    regs: [256]Value = undefined,
+
+    pub fn run(vm: *VM) void {
+        while (vm.pc < vm.program.len) {
+            const code = vm.program[vm.pc];
+            switch (code) {
+                .nop => {},
+                .crash => std.debug.panic("crash", .{}),
+                .push => |value| {
+                    vm.stack[vm.stack_idx] = value;
+                    vm.stack_idx += 1;
+                },
+                .pop => {
+                    vm.stack_idx -= 1;
+                },
+                .reg_get => |reg| {
+                    vm.stack[vm.stack_idx] = vm.regs[reg];
+                    vm.stack_idx += 1;
+                },
+                .reg_set => |reg| {
+                    vm.stack_idx -= 1;
+                    vm.regs[reg] = vm.stack[vm.stack_idx];
+                },
+                .int_add => {
+                    vm.stack_idx -= 1;
+                    const b = vm.stack[vm.stack_idx];
+                    vm.stack_idx -= 1;
+                    const a = vm.stack[vm.stack_idx];
+                    vm.stack[vm.stack_idx] = Value.fromNumber(a.asNumber() + b.asNumber());
+                    vm.stack_idx += 1;
+                },
+                .float_add => {
+                    vm.stack_idx -= 1;
+                    const b = vm.stack[vm.stack_idx];
+                    vm.stack_idx -= 1;
+                    const a = vm.stack[vm.stack_idx];
+                    vm.stack[vm.stack_idx] = Value.fromFloat(a.asFloat() + b.asFloat());
+                    vm.stack_idx += 1;
+                },
+                .debug_print => {
+                    vm.stack_idx -= 1;
+                    const v = vm.stack[vm.stack_idx];
+                    if (v.isNumber()) {
+                        std.debug.print("{}\n", .{v.asNumber()});
+                    } else if (v.isFloat()) {
+                        std.debug.print("{}\n", .{v.asFloat()});
+                    }
+                },
+            }
+            vm.pc += 1;
+        }
+    }
+};
+
+test "VM" {
+    var parser = Parser.init(std.testing.allocator, "34 + 35\n420");
+    defer parser.deinit(std.testing.allocator);
+    var bc = BytecodeCompiler.init(std.testing.allocator, (try parser.parse()).?);
+    defer bc.deinit();
+    const program = try bc.compile();
+    var vm = VM{ .program = program.items };
+    vm.run();
+}
