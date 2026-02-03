@@ -207,6 +207,7 @@ const Parser = struct {
     pub const Error = Allocator.Error;
 
     pub const ParseTree = struct {
+        root: Node.Id = undefined,
         nodes: ArrayList(Node) = .empty,
 
         const Node = union(enum) {
@@ -277,8 +278,8 @@ const Parser = struct {
             node.stmt.next = sibling_id;
         }
 
-        pub fn dump(self: ParseTree, root: Node.Id) void {
-            self.dumpRecurse(root, 0);
+        pub fn dump(self: ParseTree) void {
+            self.dumpRecurse(self.root, 0);
         }
 
         fn dumpRecurse(self: ParseTree, node: Node.Id, level: usize) void {
@@ -329,15 +330,15 @@ const Parser = struct {
         parser.parse_tree.nodes.deinit(alloc);
     }
 
-    pub fn parse(self: *Parser) Error!?ParseTree.Node.Id {
+    pub fn parse(self: *Parser) Error!?ParseTree {
         var stmt = try self.parseStmt() orelse return null;
-        const root = stmt;
+        self.parse_tree.root = stmt;
         while (self.tokenizer.peekToken() != null) {
             const nextStmt = try self.parseStmt() orelse break;
             self.parse_tree.setSibling(stmt, nextStmt);
             stmt = nextStmt;
         }
-        return root;
+        return self.parse_tree;
     }
 
     fn parseStmt(self: *Parser) Error!?ParseTree.Node.Id {
@@ -378,7 +379,11 @@ const Parser = struct {
         const token = self.tokenizer.nextToken() orelse return null;
         // TODO: error report
         return switch (token.kind) {
-            .lparen => self.parseExpr(0),
+            .lparen => {
+                const expr = (try self.parseExpr(0)).?;
+                if (self.tokenizer.nextToken().?.kind != .rparen) std.debug.panic("missing )", .{});
+                return expr;
+            },
             .number => try self.parse_tree.addNode(self.alloc, .{ .number = std.fmt.parseInt(i32, token.repr, 10) catch unreachable }),
             .float => try self.parse_tree.addNode(self.alloc, .{ .float = std.fmt.parseFloat(f64, token.repr) catch unreachable }),
             .symbol => try self.parse_tree.addNode(self.alloc, .{ .symbol = token.repr }),
@@ -390,8 +395,8 @@ const Parser = struct {
 test "Parser" {
     var parser = Parser.init(std.testing.allocator, "a + b * c + d\n e * 5 * 6\n f / 7 / 8\n");
     defer parser.deinit(std.testing.allocator);
-    const root = try parser.parse() orelse unreachable;
-    parser.parse_tree.dumpRecurse(root, 0);
+    const parse_tree = try parser.parse();
+    parse_tree.?.dump();
 }
 
 const Value = packed struct {
@@ -454,3 +459,102 @@ test "Value" {
     // NaN is special, because it cannot be equal to itself
     try std.testing.expect(Value.fromFloat(nan).isFloat());
 }
+
+const Bytecode = union(enum) {
+    nop,
+    crash,
+    push: Value,
+    pop,
+    reg_get: usize,
+    reg_set: usize,
+    int_add,
+    float_add,
+    debug_print,
+};
+
+const BytecodeCompiler = struct {
+    alloc: Allocator,
+    registers: ArrayList(ArrayList([]const u8)) = .empty,
+    parse_tree: Parser.ParseTree = .{},
+    code: ArrayList(Bytecode) = .empty,
+
+    pub fn init(alloc: Allocator, parse_tree: Parser.ParseTree) BytecodeCompiler {
+        return .{ .alloc = alloc, .parse_tree = parse_tree };
+    }
+
+    pub fn deinit(c: *BytecodeCompiler) void {
+        for (c.registers.items) |*regs| {
+            regs.deinit(c.alloc);
+        }
+        c.registers.deinit(c.alloc);
+        c.code.deinit(c.alloc);
+    }
+
+    pub fn compile(c: *BytecodeCompiler) !ArrayList(Bytecode) {
+        try c.registers.append(c.alloc, .empty);
+        try c.compileStmts(c.parse_tree.root);
+        return c.code;
+    }
+
+    fn compileStmts(c: *BytecodeCompiler, nodeId: Parser.ParseTree.Node.Id) !void {
+        var stmt = c.parse_tree.getNode(nodeId).stmt;
+        while (true) {
+            try c.compileExpr(stmt.node);
+            try c.code.append(c.alloc, Bytecode.debug_print);
+            if (stmt.next) |next| {
+                const nextStmt = c.parse_tree.getNode(next).stmt;
+                stmt = nextStmt;
+            } else break;
+        }
+    }
+
+    // TODO: maybe use Node to reduce getNode
+    fn compileExpr(c: *BytecodeCompiler, nodeId: Parser.ParseTree.Node.Id) !void {
+        switch (c.parse_tree.getNode(nodeId)) {
+            .stmt => unreachable,
+            .binop => |binop| {
+                switch (binop.op) {
+                    .assignment => {
+                        // TODO: assignment only means declaration for now
+                        const symbol = c.parse_tree.getNode(binop.lhs).symbol; // declarations can only happen to symbols...
+                        const reg = try c.createRegister(symbol);
+                        try c.code.append(c.alloc, Bytecode{ .reg_set = reg });
+                    },
+                    .addition => {
+                        try c.compileExpr(binop.lhs);
+                        try c.compileExpr(binop.rhs);
+                        try c.code.append(c.alloc, Bytecode.int_add); // TODO: This should be based on the type of lhs and rhs
+                    },
+                    .subtraction => unreachable,
+                    .multiplication => unreachable,
+                    .division => unreachable,
+                }
+            },
+            .symbol => |symbol| {
+                const reg = c.findRegister(symbol) orelse std.debug.panic("undeclared symbol: {s}", .{symbol});
+                try c.code.append(c.alloc, Bytecode{ .reg_get = reg });
+            },
+            .number => |number| {
+                try c.code.append(c.alloc, Bytecode{ .push = .fromNumber(number) });
+            },
+            .float => |float| {
+                try c.code.append(c.alloc, Bytecode{ .push = .fromFloat(float) });
+            },
+        }
+    }
+
+    fn createRegister(c: *BytecodeCompiler, reg: []const u8) !usize {
+        var block_regs = c.registers.getLast();
+        try block_regs.append(c.alloc, reg);
+        return block_regs.items.len - 1;
+    }
+
+    fn findRegister(c: BytecodeCompiler, reg: []const u8) ?usize {
+        const block_regs = c.registers.getLast().items;
+        for (block_regs, 0..) |block_reg, i| {
+            if (std.mem.eql(u8, block_reg, reg)) return i;
+        }
+        return null;
+    }
+};
+
