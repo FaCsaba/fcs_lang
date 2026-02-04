@@ -212,6 +212,7 @@ const Parser = struct {
 
         const Node = union(enum) {
             stmt: Stmt,
+            vardecl: []const u8,
             binop: BinaryOp,
             symbol: []const u8,
             number: i32,
@@ -239,9 +240,9 @@ const Parser = struct {
                 };
                 fn precedence(op: Op) OpInfo {
                     return switch (op) {
+                        .assignment => OpInfo{ .precedence = 1, .left_assoc = false },
                         .addition, .subtraction => OpInfo{ .precedence = 1, .left_assoc = true },
                         .multiplication, .division => OpInfo{ .precedence = 2, .left_assoc = true },
-                        else => unreachable,
                     };
                 }
 
@@ -291,6 +292,10 @@ const Parser = struct {
                         for (0..level) |_| std.debug.print("  ", .{});
                         self.dumpRecurse(next, level);
                     }
+                },
+                .vardecl => |vardecl| {
+                    for (0..level) |_| std.debug.print("  ", .{});
+                    std.debug.print("legyen {s}\n", .{vardecl});
                 },
                 .binop => |binop| {
                     for (0..level) |_| std.debug.print("  ", .{});
@@ -378,7 +383,7 @@ const Parser = struct {
     fn parsePrimary(self: *Parser) Error!?ParseTree.Node.Id {
         const token = self.tokenizer.nextToken() orelse return null;
         // TODO: error report
-        return switch (token.kind) {
+        return blk: switch (token.kind) {
             .lparen => {
                 const expr = (try self.parseExpr(0)).?;
                 if (self.tokenizer.nextToken().?.kind != .rparen) std.debug.panic("missing )", .{});
@@ -387,6 +392,11 @@ const Parser = struct {
             .number => try self.parse_tree.addNode(self.alloc, .{ .number = std.fmt.parseInt(i32, token.repr, 10) catch unreachable }),
             .float => try self.parse_tree.addNode(self.alloc, .{ .float = std.fmt.parseFloat(f64, token.repr) catch unreachable }),
             .symbol => try self.parse_tree.addNode(self.alloc, .{ .symbol = token.repr }),
+            .keyword_legyen => {
+                const symbol = self.tokenizer.nextToken() orelse std.debug.panic("expected symbol after legyen", .{});
+                if (symbol.kind != .symbol) std.debug.panic("expected symbol after legyen, got {}", .{symbol});
+                break :blk try self.parse_tree.addNode(self.alloc, .{ .vardecl = symbol.repr });
+            },
             else => std.debug.panic("got {}", .{token}),
         };
     }
@@ -517,13 +527,24 @@ const BytecodeCompiler = struct {
     fn compileExpr(c: *BytecodeCompiler, nodeId: Parser.ParseTree.Node.Id) !void {
         switch (c.parse_tree.getNode(nodeId)) {
             .stmt => unreachable,
+            .vardecl => |vardecl| {
+                _ = try c.createRegister(vardecl);
+            },
             .binop => |binop| {
                 switch (binop.op) {
                     .assignment => {
-                        // TODO: assignment only means declaration for now
-                        const symbol = c.parse_tree.getNode(binop.lhs).symbol; // declarations can only happen to symbols...
-                        const reg = try c.createRegister(symbol);
+                        const symbol = blk: switch (c.parse_tree.getNode(binop.lhs)) {
+                            .vardecl => |vardecl| {
+                                try c.compileExpr(binop.lhs);
+                                break :blk vardecl;
+                            },
+                            .symbol => |s| s,
+                            else => std.debug.panic("expected vardecl or symbol", .{}),
+                        };
+                        const reg = c.findRegister(symbol) orelse std.debug.panic("undeclared var: {s}", .{symbol});
+                        try c.compileExpr(binop.rhs);
                         try c.code.append(c.alloc, Bytecode{ .reg_set = reg });
+                        try c.code.append(c.alloc, Bytecode{ .reg_get = reg });
                     },
                     .addition => {
                         try c.compileExpr(binop.lhs);
@@ -561,15 +582,23 @@ const BytecodeCompiler = struct {
     }
 
     fn createRegister(c: *BytecodeCompiler, reg: []const u8) !usize {
-        var block_regs = c.registers.getLast();
+        if (c.findRegister(reg) != null) std.debug.panic("var redeclaration: {s}", .{reg});
+        var block_regs = &c.registers.items[c.registers.items.len - 1];
         try block_regs.append(c.alloc, reg);
         return block_regs.items.len - 1;
     }
 
     fn findRegister(c: BytecodeCompiler, reg: []const u8) ?usize {
-        const block_regs = c.registers.getLast().items;
-        for (block_regs, 0..) |block_reg, i| {
-            if (std.mem.eql(u8, block_reg, reg)) return i;
+        var blocks_i = c.registers.items.len;
+        while (blocks_i != 0) {
+            blocks_i -= 1;
+            const block_regs = c.registers.items[blocks_i];
+            var regs_i = block_regs.items.len;
+            while (regs_i != 0) {
+                regs_i -= 1;
+                const block_reg = block_regs.items[regs_i];
+                if (std.mem.eql(u8, block_reg, reg)) return regs_i;
+            }
         }
         return null;
     }
@@ -645,9 +674,11 @@ const VM = struct {
 };
 
 test "VM" {
-    var parser = Parser.init(std.testing.allocator, "6 / 4\n420 - 69");
+    var parser = Parser.init(std.testing.allocator, "legyen a = 6 / 4\na - 70");
     defer parser.deinit(std.testing.allocator);
-    var bc = BytecodeCompiler.init(std.testing.allocator, (try parser.parse()).?);
+    const parse_tree = (try parser.parse()).?;
+    parse_tree.dump();
+    var bc = BytecodeCompiler.init(std.testing.allocator, parse_tree);
     defer bc.deinit();
     const program = try bc.compile();
     var vm = VM{ .program = program.items };
