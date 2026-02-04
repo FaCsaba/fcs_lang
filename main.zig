@@ -418,6 +418,7 @@ const Value = packed struct {
     }
 
     pub fn asFloat(v: Value) f64 {
+        std.debug.assert(v.isFloat());
         return @bitCast(v);
     }
 
@@ -430,6 +431,7 @@ const Value = packed struct {
     }
 
     pub fn asNumber(v: Value) i32 {
+        std.debug.assert(v.isNumber());
         const n_s: i48 = @bitCast(v.payload);
         return @truncate(n_s);
     }
@@ -468,6 +470,9 @@ const Bytecode = union(enum) {
     reg_get: usize,
     reg_set: usize,
     int_add,
+    int_sub,
+    int_mult,
+    int_div,
     float_add,
     debug_print,
 };
@@ -525,9 +530,21 @@ const BytecodeCompiler = struct {
                         try c.compileExpr(binop.rhs);
                         try c.code.append(c.alloc, Bytecode.int_add); // TODO: This should be based on the type of lhs and rhs
                     },
-                    .subtraction => unreachable,
-                    .multiplication => unreachable,
-                    .division => unreachable,
+                    .subtraction => {
+                        try c.compileExpr(binop.lhs);
+                        try c.compileExpr(binop.rhs);
+                        try c.code.append(c.alloc, Bytecode.int_sub); // TODO: This should be based on the type of lhs and rhs
+                    },
+                    .multiplication => {
+                        try c.compileExpr(binop.lhs);
+                        try c.compileExpr(binop.rhs);
+                        try c.code.append(c.alloc, Bytecode.int_mult); // TODO: This should be based on the type of lhs and rhs
+                    },
+                    .division => {
+                        try c.compileExpr(binop.lhs);
+                        try c.compileExpr(binop.rhs);
+                        try c.code.append(c.alloc, Bytecode.int_div); // TODO: This should be based on the type of lhs and rhs
+                    },
                 }
             },
             .symbol => |symbol| {
@@ -572,40 +589,37 @@ const VM = struct {
             switch (code) {
                 .nop => {},
                 .crash => std.debug.panic("crash", .{}),
-                .push => |value| {
-                    vm.stack[vm.stack_idx] = value;
-                    vm.stack_idx += 1;
-                },
-                .pop => {
-                    vm.stack_idx -= 1;
-                },
-                .reg_get => |reg| {
-                    vm.stack[vm.stack_idx] = vm.regs[reg];
-                    vm.stack_idx += 1;
-                },
-                .reg_set => |reg| {
-                    vm.stack_idx -= 1;
-                    vm.regs[reg] = vm.stack[vm.stack_idx];
-                },
+                .push => |value| vm.push(value),
+                .pop => _ = vm.pop(),
+                .reg_get => |reg| vm.push(vm.regs[reg]),
+                .reg_set => |reg| vm.regs[reg] = vm.pop(),
                 .int_add => {
-                    vm.stack_idx -= 1;
-                    const b = vm.stack[vm.stack_idx];
-                    vm.stack_idx -= 1;
-                    const a = vm.stack[vm.stack_idx];
-                    vm.stack[vm.stack_idx] = Value.fromNumber(a.asNumber() + b.asNumber());
-                    vm.stack_idx += 1;
+                    const b = vm.pop();
+                    const a = vm.pop();
+                    vm.push(Value.fromNumber(a.asNumber() + b.asNumber()));
+                },
+                .int_sub => {
+                    const b = vm.pop();
+                    const a = vm.pop();
+                    vm.push(Value.fromNumber(a.asNumber() - b.asNumber()));
+                },
+                .int_mult => {
+                    const b = vm.pop();
+                    const a = vm.pop();
+                    vm.push(Value.fromNumber(a.asNumber() * b.asNumber()));
+                },
+                .int_div => {
+                    const b = vm.pop();
+                    const a = vm.pop();
+                    vm.push(Value.fromNumber(@divTrunc(a.asNumber(), b.asNumber())));
                 },
                 .float_add => {
-                    vm.stack_idx -= 1;
-                    const b = vm.stack[vm.stack_idx];
-                    vm.stack_idx -= 1;
-                    const a = vm.stack[vm.stack_idx];
-                    vm.stack[vm.stack_idx] = Value.fromFloat(a.asFloat() + b.asFloat());
-                    vm.stack_idx += 1;
+                    const b = vm.pop();
+                    const a = vm.pop();
+                    vm.push(Value.fromFloat(a.asFloat() + b.asFloat()));
                 },
                 .debug_print => {
-                    vm.stack_idx -= 1;
-                    const v = vm.stack[vm.stack_idx];
+                    const v = vm.pop();
                     if (v.isNumber()) {
                         std.debug.print("{}\n", .{v.asNumber()});
                     } else if (v.isFloat()) {
@@ -616,10 +630,22 @@ const VM = struct {
             vm.pc += 1;
         }
     }
+
+    fn pop(vm: *VM) Value {
+        if (vm.stack_idx == 0) std.debug.panic("stack underflow", .{});
+        vm.stack_idx -= 1;
+        return vm.stack[vm.stack_idx];
+    }
+
+    fn push(vm: *VM, v: Value) void {
+        if (vm.stack_idx == vm.stack.len) std.debug.panic("stack overflow", .{});
+        vm.stack[vm.stack_idx] = v;
+        vm.stack_idx += 1;
+    }
 };
 
 test "VM" {
-    var parser = Parser.init(std.testing.allocator, "34 + 35\n420");
+    var parser = Parser.init(std.testing.allocator, "6 / 4\n420 - 69");
     defer parser.deinit(std.testing.allocator);
     var bc = BytecodeCompiler.init(std.testing.allocator, (try parser.parse()).?);
     defer bc.deinit();
