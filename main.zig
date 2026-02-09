@@ -199,159 +199,154 @@ fn newId(T: type) type {
     };
 }
 
+pub const ParseTree = struct {
+    root: Node.Id = undefined,
+    nodes: ArrayList(Node) = .empty,
+
+    const Error = Allocator.Error;
+
+    const Node = union(enum) {
+        stmt: Stmt,
+        vardecl: []const u8,
+        binop: BinaryOp,
+        symbol: []const u8,
+        number: i32,
+        float: f64,
+        // string: []const u8,
+
+        pub const Id = newId(usize);
+    };
+
+    const BinaryOp = struct {
+        lhs: Node.Id,
+        rhs: Node.Id,
+        op: Op,
+
+        const Op = enum(u8) {
+            assignment,
+            addition,
+            subtraction,
+            multiplication,
+            division,
+
+            const OpInfo = struct {
+                precedence: u8,
+                left_assoc: bool,
+            };
+            fn precedence(op: Op) OpInfo {
+                return switch (op) {
+                    .assignment => OpInfo{ .precedence = 1, .left_assoc = false },
+                    .addition, .subtraction => OpInfo{ .precedence = 1, .left_assoc = true },
+                    .multiplication, .division => OpInfo{ .precedence = 2, .left_assoc = true },
+                };
+            }
+
+            fn fromToken(kind: Tokenizer.Token.Kind) ?Op {
+                return switch (kind) {
+                    .plus => .addition,
+                    .minus => .subtraction,
+                    .star => .multiplication,
+                    .slash => .division,
+                    .equals => .assignment,
+                    else => null,
+                };
+            }
+        };
+    };
+
+    const Stmt = struct {
+        node: Node.Id,
+        next: ?Node.Id = null,
+    };
+
+    pub fn deinit(self: *ParseTree, alloc: Allocator) void {
+        self.nodes.deinit(alloc);
+    }
+
+    pub fn addNode(self: *ParseTree, alloc: Allocator, node: Node) Error!Node.Id {
+        const id = Node.Id.fromInt(self.nodes.items.len);
+        try self.nodes.append(alloc, node);
+        return id;
+    }
+
+    pub fn getNode(self: ParseTree, id: Node.Id) Node {
+        return self.nodes.items[id.toInt()];
+    }
+
+    pub fn setSibling(self: *ParseTree, node_id: Node.Id, sibling_id: ?Node.Id) void {
+        const node = &self.nodes.items[node_id.toInt()];
+        node.stmt.next = sibling_id;
+    }
+
+    pub fn dump(self: ParseTree) void {
+        self.dumpRecurse(self.root, 0);
+    }
+
+    fn dumpRecurse(self: ParseTree, node: Node.Id, level: usize) void {
+        switch (self.getNode(node)) {
+            .stmt => |stmt| {
+                for (0..level) |_| std.debug.print("  ", .{});
+                self.dumpRecurse(stmt.node, level);
+                if (stmt.next) |next| {
+                    for (0..level) |_| std.debug.print("  ", .{});
+                    self.dumpRecurse(next, level);
+                }
+            },
+            .vardecl => |vardecl| {
+                for (0..level) |_| std.debug.print("  ", .{});
+                std.debug.print("legyen {s}\n", .{vardecl});
+            },
+            .binop => |binop| {
+                for (0..level) |_| std.debug.print("  ", .{});
+                std.debug.print("{}:\n", .{binop.op});
+                self.dumpRecurse(binop.lhs, level + 1);
+                self.dumpRecurse(binop.rhs, level + 1);
+            },
+            .symbol => |symbol| {
+                for (0..level) |_| std.debug.print("  ", .{});
+                std.debug.print("{s}\n", .{symbol});
+            },
+            .number => |number| {
+                for (0..level) |_| std.debug.print("  ", .{});
+                std.debug.print("{}\n", .{number});
+            },
+            .float => |float| {
+                for (0..level) |_| std.debug.print("  ", .{});
+                std.debug.print("{}\n", .{float});
+            },
+            // .string => |string| {
+            //     for (0..level) |_| std.debug.print("  ", .{});
+            //     std.debug.print("\"{}\"", .{string});
+            // },
+        }
+    }
+};
+
 const Parser = struct {
-    tokenizer: Tokenizer,
     alloc: Allocator,
+    tokenizer: Tokenizer,
     parse_tree: ParseTree,
 
     pub const Error = Allocator.Error;
 
-    pub const ParseTree = struct {
-        root: Node.Id = undefined,
-        nodes: ArrayList(Node) = .empty,
-
-        const Node = union(enum) {
-            stmt: Stmt,
-            vardecl: []const u8,
-            binop: BinaryOp,
-            symbol: []const u8,
-            number: i32,
-            float: f64,
-            // string: []const u8,
-
-            pub const Id = newId(usize);
-        };
-
-        const BinaryOp = struct {
-            lhs: Node.Id,
-            rhs: Node.Id,
-            op: Op,
-
-            const Op = enum(u8) {
-                assignment,
-                addition,
-                subtraction,
-                multiplication,
-                division,
-
-                const OpInfo = struct {
-                    precedence: u8,
-                    left_assoc: bool,
-                };
-                fn precedence(op: Op) OpInfo {
-                    return switch (op) {
-                        .assignment => OpInfo{ .precedence = 1, .left_assoc = false },
-                        .addition, .subtraction => OpInfo{ .precedence = 1, .left_assoc = true },
-                        .multiplication, .division => OpInfo{ .precedence = 2, .left_assoc = true },
-                    };
-                }
-
-                fn fromToken(kind: Tokenizer.Token.Kind) ?Op {
-                    return switch (kind) {
-                        .plus => .addition,
-                        .minus => .subtraction,
-                        .star => .multiplication,
-                        .slash => .division,
-                        .equals => .assignment,
-                        else => null,
-                    };
-                }
-            };
-        };
-
-        const Stmt = struct {
-            node: Node.Id,
-            next: ?Node.Id = null,
-        };
-
-        pub fn addNode(self: *ParseTree, alloc: Allocator, node: Node) Error!Node.Id {
-            const id = Node.Id.fromInt(self.nodes.items.len);
-            try self.nodes.append(alloc, node);
-            return id;
-        }
-
-        pub fn getNode(self: ParseTree, id: Node.Id) Node {
-            return self.nodes.items[id.toInt()];
-        }
-
-        pub fn setSibling(self: *ParseTree, node_id: Node.Id, sibling_id: ?Node.Id) void {
-            const node = &self.nodes.items[node_id.toInt()];
-            node.stmt.next = sibling_id;
-        }
-
-        pub fn dump(self: ParseTree) void {
-            self.dumpRecurse(self.root, 0);
-        }
-
-        fn dumpRecurse(self: ParseTree, node: Node.Id, level: usize) void {
-            switch (self.getNode(node)) {
-                .stmt => |stmt| {
-                    for (0..level) |_| std.debug.print("  ", .{});
-                    self.dumpRecurse(stmt.node, level);
-                    if (stmt.next) |next| {
-                        for (0..level) |_| std.debug.print("  ", .{});
-                        self.dumpRecurse(next, level);
-                    }
-                },
-                .vardecl => |vardecl| {
-                    for (0..level) |_| std.debug.print("  ", .{});
-                    std.debug.print("legyen {s}\n", .{vardecl});
-                },
-                .binop => |binop| {
-                    for (0..level) |_| std.debug.print("  ", .{});
-                    std.debug.print("{}:\n", .{binop.op});
-                    self.dumpRecurse(binop.lhs, level + 1);
-                    self.dumpRecurse(binop.rhs, level + 1);
-                },
-                .symbol => |symbol| {
-                    for (0..level) |_| std.debug.print("  ", .{});
-                    std.debug.print("{s}\n", .{symbol});
-                },
-                .number => |number| {
-                    for (0..level) |_| std.debug.print("  ", .{});
-                    std.debug.print("{}\n", .{number});
-                },
-                .float => |float| {
-                    for (0..level) |_| std.debug.print("  ", .{});
-                    std.debug.print("{}\n", .{float});
-                },
-                // .string => |string| {
-                //     for (0..level) |_| std.debug.print("  ", .{});
-                //     std.debug.print("\"{}\"", .{string});
-                // },
-            }
-        }
-    };
-
-    pub fn init(alloc: Allocator, src: []const u8) Parser {
-        return .{
-            .tokenizer = .{ .src = src },
-            .alloc = alloc,
-            .parse_tree = .{},
-        };
-    }
-
-    pub fn deinit(parser: *Parser, alloc: Allocator) void {
-        parser.parse_tree.nodes.deinit(alloc);
-    }
-
-    pub fn parse(self: *Parser) Error!?ParseTree {
-        var stmt = try self.parseStmt() orelse return null;
-        self.parse_tree.root = stmt;
-        while (self.tokenizer.peekToken() != null) {
-            const nextStmt = try self.parseStmt() orelse break;
-            self.parse_tree.setSibling(stmt, nextStmt);
+    pub fn parse(alloc: Allocator, src: []const u8) Error!?ParseTree {
+        var parser = Parser{ .alloc = alloc, .tokenizer = .{ .src = src }, .parse_tree = .{} };
+        var stmt = try parser.parseStmt() orelse return null;
+        parser.parse_tree.root = stmt;
+        while (parser.tokenizer.peekToken() != null) {
+            const nextStmt = try parser.parseStmt(parser.parse_tree) orelse break;
+            parser.parse_tree.setSibling(stmt, nextStmt);
             stmt = nextStmt;
         }
-        return self.parse_tree;
+        return parser.parse_tree;
     }
 
-    fn parseStmt(self: *Parser) Error!?ParseTree.Node.Id {
-        const expr = try self.parseExpr(0) orelse return null;
-        const stmt = try self.parse_tree.addNode(self.alloc, .{ .stmt = .{ .node = expr } });
-        if (self.tokenizer.peekToken()) |token| {
+    fn parseStmt(parser: *Parser) Error!?ParseTree.Node.Id {
+        const expr = try parser.parseExpr(0) orelse return null;
+        const stmt = try parser.parse_tree.addNode(.{ .stmt = .{ .node = expr } });
+        if (parser.tokenizer.peekToken()) |token| {
             switch (token.kind) {
-                .newline => _ = self.tokenizer.nextToken(),
+                .newline => _ = parser.tokenizer.nextToken(),
                 else => std.debug.panic("unexpected token: {}", .{token}),
             }
         }
