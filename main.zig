@@ -17,7 +17,7 @@ const Tokenizer = struct {
         const Kind = enum {
             invalid,
             symbol,
-            number,
+            int,
             float,
             string,
             equals,
@@ -123,11 +123,11 @@ const Tokenizer = struct {
                     _ = t.nextCodepoint();
                     continue :loop .number_dot;
                 },
-                else => return Token{ .repr = t.repr(start), .kind = .number },
+                else => return Token{ .repr = t.repr(start), .kind = .int },
             },
             .number_dot => switch (t.peekCodepoint()) {
                 '0'...'9' => continue :loop .number_float,
-                else => return Token{ .repr = t.repr(start), .kind = .number },
+                else => return Token{ .repr = t.repr(start), .kind = .int },
             },
             .number_float => switch (t.peekCodepoint()) {
                 '0'...'9' => {
@@ -169,7 +169,7 @@ test "Tokenizer" {
     try expectTokenEqual("legyen", .keyword_legyen, tz1.nextToken());
     try expectTokenEqual("kutya", .symbol, tz1.nextToken());
     try expectTokenEqual("=", .equals, tz1.nextToken());
-    try expectTokenEqual("123", .number, tz1.nextToken());
+    try expectTokenEqual("123", .int, tz1.nextToken());
 
     var tz2 = Tokenizer{ .src = "alma\n123.456\nbűnöző" };
     try expectTokenEqual("alma", .symbol, tz2.nextToken());
@@ -210,7 +210,7 @@ pub const ParseTree = struct {
         vardecl: []const u8,
         binop: BinaryOp,
         symbol: []const u8,
-        number: i32,
+        int: i32,
         float: f64,
         // string: []const u8,
 
@@ -306,9 +306,9 @@ pub const ParseTree = struct {
                 for (0..level) |_| std.debug.print("  ", .{});
                 std.debug.print("{s}\n", .{symbol});
             },
-            .number => |number| {
+            .int => |int| {
                 for (0..level) |_| std.debug.print("  ", .{});
-                std.debug.print("{}\n", .{number});
+                std.debug.print("{}\n", .{int});
             },
             .float => |float| {
                 for (0..level) |_| std.debug.print("  ", .{});
@@ -384,7 +384,7 @@ const Parser = struct {
                 if (self.tokenizer.nextToken().?.kind != .rparen) std.debug.panic("missing )", .{});
                 return expr;
             },
-            .number => try self.parse_tree.addNode(self.alloc, .{ .number = std.fmt.parseInt(i32, token.repr, 10) catch unreachable }),
+            .int => try self.parse_tree.addNode(self.alloc, .{ .int = std.fmt.parseInt(i32, token.repr, 10) catch unreachable }),
             .float => try self.parse_tree.addNode(self.alloc, .{ .float = std.fmt.parseFloat(f64, token.repr) catch unreachable }),
             .symbol => try self.parse_tree.addNode(self.alloc, .{ .symbol = token.repr }),
             .keyword_legyen => {
@@ -409,8 +409,17 @@ const Value = packed struct {
 
     const NanTag: u16 = @as(u64, @bitCast(std.math.nan(f64))) >> 48;
 
-    // TODO: Change number to int in other places
-    const IntTag: u16 = 0x001 | NanTag;
+    const Type = enum(u16) {
+        float,
+        nil,
+        int,
+        _,
+
+        pub fn tag(t: Type) u16 {
+            if (t == .float) std.debug.panic("Tag of Type.float requested, but it is a special case, floats do not have nan tags. This is a compiler bug.", .{});
+            return @intFromEnum(t) | NanTag;
+        }
+    };
 
     comptime {
         std.debug.assert(@sizeOf(Value) == 8);
@@ -430,28 +439,31 @@ const Value = packed struct {
         return @bitCast(f);
     }
 
-    pub fn isNumber(v: Value) bool {
-        return v.nan_tag == IntTag;
+    pub fn isType(v: Value, t: Type) bool {
+        return switch (t) {
+            .float => v.isFloat(),
+            else => v.nan_tag == t.tag(),
+        };
     }
 
-    pub fn asNumber(v: Value) i32 {
-        std.debug.assert(v.isNumber());
+    pub fn asInt(v: Value) i32 {
+        std.debug.assert(v.isType(Type.int));
         const n_s: i48 = @bitCast(v.payload);
         return @truncate(n_s);
     }
 
-    pub fn fromNumber(n: i32) Value {
+    pub fn fromInt(n: i32) Value {
         const n_s: u32 = @bitCast(n);
-        return Value{ .nan_tag = IntTag, .payload = n_s };
+        return Value{ .nan_tag = Type.int.tag(), .payload = n_s };
     }
 };
 
 test "Value" {
-    const numbers = [_]i32{ 5, -1, 12, std.math.maxInt(i32), std.math.minInt(i32) };
-    for (numbers) |n| {
-        const v = Value.fromNumber(n);
-        try std.testing.expect(v.isNumber());
-        try std.testing.expectEqual(n, v.asNumber());
+    const ints = [_]i32{ 5, -1, 12, std.math.maxInt(i32), std.math.minInt(i32) };
+    for (ints) |n| {
+        const v = Value.fromInt(n);
+        try std.testing.expect(v.isType(Value.Type.int));
+        try std.testing.expectEqual(n, v.asInt());
     }
 
     const floats = [_]f64{ 0, -1.1, 69, std.math.pi };
@@ -566,8 +578,8 @@ const BytecodeCompiler = struct {
                 const reg = c.findRegister(symbol) orelse std.debug.panic("undeclared symbol: {s}", .{symbol});
                 try c.code.append(c.alloc, Bytecode{ .reg_get = reg });
             },
-            .number => |number| {
-                try c.code.append(c.alloc, Bytecode{ .push = .fromNumber(number) });
+            .int => |int| {
+                try c.code.append(c.alloc, Bytecode{ .push = .fromInt(int) });
             },
             .float => |float| {
                 try c.code.append(c.alloc, Bytecode{ .push = .fromFloat(float) });
@@ -619,22 +631,22 @@ const VM = struct {
                 .int_add => {
                     const b = vm.pop();
                     const a = vm.pop();
-                    vm.push(Value.fromNumber(a.asNumber() + b.asNumber()));
+                    vm.push(Value.fromInt(a.asInt() + b.asInt()));
                 },
                 .int_sub => {
                     const b = vm.pop();
                     const a = vm.pop();
-                    vm.push(Value.fromNumber(a.asNumber() - b.asNumber()));
+                    vm.push(Value.fromInt(a.asInt() - b.asInt()));
                 },
                 .int_mult => {
                     const b = vm.pop();
                     const a = vm.pop();
-                    vm.push(Value.fromNumber(a.asNumber() * b.asNumber()));
+                    vm.push(Value.fromInt(a.asInt() * b.asInt()));
                 },
                 .int_div => {
                     const b = vm.pop();
                     const a = vm.pop();
-                    vm.push(Value.fromNumber(@divTrunc(a.asNumber(), b.asNumber())));
+                    vm.push(Value.fromInt(@divTrunc(a.asInt(), b.asInt())));
                 },
                 .float_add => {
                     const b = vm.pop();
@@ -643,8 +655,8 @@ const VM = struct {
                 },
                 .debug_print => {
                     const v = vm.pop();
-                    if (v.isNumber()) {
-                        std.debug.print("{}\n", .{v.asNumber()});
+                    if (v.isType(Value.Type.int)) {
+                        std.debug.print("{}\n", .{v.asInt()});
                     } else if (v.isFloat()) {
                         std.debug.print("{}\n", .{v.asFloat()});
                     }
