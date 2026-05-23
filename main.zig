@@ -334,7 +334,7 @@ const Parser = struct {
         var stmt = try parser.parseStmt() orelse return null;
         parser.parse_tree.root = stmt;
         while (parser.tokenizer.peekToken() != null) {
-            const nextStmt = try parser.parseStmt(parser.parse_tree) orelse break;
+            const nextStmt = try parser.parseStmt() orelse break;
             parser.parse_tree.setSibling(stmt, nextStmt);
             stmt = nextStmt;
         }
@@ -343,7 +343,7 @@ const Parser = struct {
 
     fn parseStmt(parser: *Parser) Error!?ParseTree.Node.Id {
         const expr = try parser.parseExpr(0) orelse return null;
-        const stmt = try parser.parse_tree.addNode(.{ .stmt = .{ .node = expr } });
+        const stmt = try parser.parse_tree.addNode(parser.alloc, .{ .stmt = .{ .node = expr } });
         if (parser.tokenizer.peekToken()) |token| {
             switch (token.kind) {
                 .newline => _ = parser.tokenizer.nextToken(),
@@ -398,10 +398,9 @@ const Parser = struct {
 };
 
 test "Parser" {
-    var parser = Parser.init(std.testing.allocator, "a + b * c + d\n e * 5 * 6\n f / 7 / 8\n");
-    defer parser.deinit(std.testing.allocator);
-    const parse_tree = try parser.parse();
+    var parse_tree = try Parser.parse(std.testing.allocator, "a + b * c + d\n e * 5 * 6\n f / 7 / 8\n");
     parse_tree.?.dump();
+    parse_tree.?.deinit(std.testing.allocator);
 }
 
 const Value = packed struct {
@@ -485,10 +484,10 @@ const Bytecode = union(enum) {
 const BytecodeCompiler = struct {
     alloc: Allocator,
     registers: ArrayList(ArrayList([]const u8)) = .empty,
-    parse_tree: Parser.ParseTree = .{},
+    parse_tree: ParseTree = .{},
     code: ArrayList(Bytecode) = .empty,
 
-    pub fn init(alloc: Allocator, parse_tree: Parser.ParseTree) BytecodeCompiler {
+    pub fn init(alloc: Allocator, parse_tree: ParseTree) BytecodeCompiler {
         return .{ .alloc = alloc, .parse_tree = parse_tree };
     }
 
@@ -506,7 +505,7 @@ const BytecodeCompiler = struct {
         return c.code;
     }
 
-    fn compileStmts(c: *BytecodeCompiler, nodeId: Parser.ParseTree.Node.Id) !void {
+    fn compileStmts(c: *BytecodeCompiler, nodeId: ParseTree.Node.Id) !void {
         var stmt = c.parse_tree.getNode(nodeId).stmt;
         while (true) {
             try c.compileExpr(stmt.node);
@@ -519,7 +518,7 @@ const BytecodeCompiler = struct {
     }
 
     // TODO: maybe use Node to reduce getNode
-    fn compileExpr(c: *BytecodeCompiler, nodeId: Parser.ParseTree.Node.Id) !void {
+    fn compileExpr(c: *BytecodeCompiler, nodeId: ParseTree.Node.Id) !void {
         switch (c.parse_tree.getNode(nodeId)) {
             .stmt => unreachable,
             .vardecl => |vardecl| {
@@ -669,9 +668,8 @@ const VM = struct {
 };
 
 test "VM" {
-    var parser = Parser.init(std.testing.allocator, "legyen a = 6 / 4\na - 70");
-    defer parser.deinit(std.testing.allocator);
-    const parse_tree = (try parser.parse()).?;
+    var parse_tree = try Parser.parse(std.testing.allocator, "legyen a = 6 / 4\na - 70") orelse std.debug.panic("Must return parse tree", .{});
+    defer parse_tree.deinit(std.testing.allocator);
     parse_tree.dump();
     var bc = BytecodeCompiler.init(std.testing.allocator, parse_tree);
     defer bc.deinit();
